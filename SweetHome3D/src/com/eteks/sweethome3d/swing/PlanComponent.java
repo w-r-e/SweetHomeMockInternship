@@ -2006,72 +2006,155 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
   /**
    * Prints this component plan at the scale given in the home print attributes or at a scale 
    * that makes it fill <code>pageFormat</code> imageable size if this attribute is <code>null</code>.
+   * Prints one page per level so that all levels are included in the output.
    */
   public int print(Graphics g, PageFormat pageFormat, int pageIndex) {
-    List<Selectable> printedItems = getPaintedItems(); 
-    Rectangle2D printedItemBounds = getItemsBounds(g, printedItems);
-    if (printedItemBounds != null) {
+    // Save the originally selected level so we can restore it after printing
+    Level originallySelectedLevel = this.home.getSelectedLevel();
+    try {
+      List<Level> levels = this.home.getLevels();
+      
       double imageableX = pageFormat.getImageableX();
       double imageableY = pageFormat.getImageableY();
       double imageableWidth = pageFormat.getImageableWidth();
       double imageableHeight = pageFormat.getImageableHeight();
-      float printScale;
-      float rowIndex;
-      float columnIndex;
-      int pagesPerRow;
-      int pagesPerColumn;
+      
       if (this.home.getPrint() == null || this.home.getPrint().getPlanScale() == null) {
-        // Compute a scale that ensures the plan will fill the component if plan scale is null
-        printScale = getPrintPreferredScale(g, pageFormat) * LengthUnit.centimeterToInch(72);
-        if (pageIndex > 0) {
+        // One page per level — pageIndex maps directly to a level index
+        if (pageIndex < 0 || pageIndex >= levels.size()) {
           return NO_SUCH_PAGE;
         }
-        pagesPerRow = 1;
-        pagesPerColumn = 1;
-        rowIndex   = 0;
-        columnIndex = 0;
+        Level levelToPrint = levels.get(pageIndex);
+        this.home.setSelectedLevel(levelToPrint);
+        
+        List<Selectable> printedItems = getPaintedItems();
+        Rectangle2D printedItemBounds = getItemsBounds(g, printedItems);
+        if (printedItemBounds == null) {
+          return NO_SUCH_PAGE;
+        }
+        
+        float printScale = getPrintPreferredScale(g, pageFormat) * LengthUnit.centimeterToInch(72);
+        float extraMargin = getStrokeWidthExtraMargin(printedItems, PaintMode.PRINT);
+        
+        Graphics2D g2D = (Graphics2D)g.create();
+        g2D.clip(new Rectangle2D.Double(imageableX, imageableY, imageableWidth, imageableHeight));
+        g2D.translate(imageableX, imageableY);
+        g2D.scale(printScale, printScale);
+        g2D.translate(-printedItemBounds.getMinX() + extraMargin,
+            -printedItemBounds.getMinY() + extraMargin);
+        g2D.translate(Math.max(0, 
+                (imageableWidth / printScale - printedItemBounds.getWidth() - 2 * extraMargin) / 2), 
+            Math.max(0, 
+                (imageableHeight / printScale - printedItemBounds.getHeight() - 2 * extraMargin) / 2));
+        setRenderingHints(g2D);
+        try {
+          paintContent(g2D, printScale, PaintMode.PRINT);
+        } catch (InterruptedIOException ex) {
+          // Ignore exception because it may happen only in EXPORT paint mode 
+        }
+        g2D.dispose();
+        return PAGE_EXISTS;
       } else {
-        // Apply print scale to paper size expressed in 1/72nds of an inch
-        printScale = this.home.getPrint().getPlanScale().floatValue() * LengthUnit.centimeterToInch(72);
-        pagesPerRow = (int)(printedItemBounds.getWidth() * printScale / imageableWidth);
+        // Fixed print scale — multiple pages per level
+        float printScale = this.home.getPrint().getPlanScale().floatValue() * LengthUnit.centimeterToInch(72);
+        
+        // Calculate total pages across all levels
+        int totalPages = 0;
+        for (Level level : levels) {
+          this.home.setSelectedLevel(level);
+          List<Selectable> printedItems = getPaintedItems();
+          Rectangle2D printedItemBounds = getItemsBounds(g, printedItems);
+          if (printedItemBounds != null) {
+            int pagesPerRow = (int)(printedItemBounds.getWidth() * printScale / imageableWidth);
+            if (printedItemBounds.getWidth() * printScale != imageableWidth) {
+              pagesPerRow++;
+            }
+            int pagesPerColumn = (int)(printedItemBounds.getHeight() * printScale / imageableHeight);
+            if (printedItemBounds.getHeight() * printScale != imageableHeight) {
+              pagesPerColumn++;
+            }
+            totalPages += pagesPerRow * pagesPerColumn;
+          }
+        }
+        
+        if (pageIndex >= totalPages) {
+          return NO_SUCH_PAGE;
+        }
+        
+        // Find which level and which page within that level corresponds to pageIndex
+        int remainingPage = pageIndex;
+        Level levelToPrint = null;
+        int pageWithinLevel = -1;
+        for (Level level : levels) {
+          this.home.setSelectedLevel(level);
+          List<Selectable> printedItems = getPaintedItems();
+          Rectangle2D printedItemBounds = getItemsBounds(g, printedItems);
+          if (printedItemBounds != null) {
+            int pagesPerRow = (int)(printedItemBounds.getWidth() * printScale / imageableWidth);
+            if (printedItemBounds.getWidth() * printScale != imageableWidth) {
+              pagesPerRow++;
+            }
+            int pagesPerColumn = (int)(printedItemBounds.getHeight() * printScale / imageableHeight);
+            if (printedItemBounds.getHeight() * printScale != imageableHeight) {
+              pagesPerColumn++;
+            }
+            int levelPages = pagesPerRow * pagesPerColumn;
+            if (remainingPage < levelPages) {
+              levelToPrint = level;
+              pageWithinLevel = remainingPage;
+              break;
+            }
+            remainingPage -= levelPages;
+          }
+        }
+        
+        if (levelToPrint == null) {
+          return NO_SUCH_PAGE;
+        }
+        
+        this.home.setSelectedLevel(levelToPrint);
+        List<Selectable> printedItems = getPaintedItems();
+        Rectangle2D printedItemBounds = getItemsBounds(g, printedItems);
+        if (printedItemBounds == null) {
+          return NO_SUCH_PAGE;
+        }
+        
+        int pagesPerRow = (int)(printedItemBounds.getWidth() * printScale / imageableWidth);
         if (printedItemBounds.getWidth() * printScale != imageableWidth) {
           pagesPerRow++;
         }
-        pagesPerColumn = (int)(printedItemBounds.getHeight() * printScale / imageableHeight);
+        int pagesPerColumn = (int)(printedItemBounds.getHeight() * printScale / imageableHeight);
         if (printedItemBounds.getHeight() * printScale != imageableHeight) {
           pagesPerColumn++;
         }
-        if (pageIndex >= pagesPerRow * pagesPerColumn) {
-          return NO_SUCH_PAGE;
+        float rowIndex = pageWithinLevel / pagesPerRow;
+        float columnIndex = pageWithinLevel - rowIndex * pagesPerRow;
+        
+        float extraMargin = getStrokeWidthExtraMargin(printedItems, PaintMode.PRINT);
+        
+        Graphics2D g2D = (Graphics2D)g.create();
+        g2D.clip(new Rectangle2D.Double(imageableX, imageableY, imageableWidth, imageableHeight));
+        g2D.translate(imageableX - columnIndex * imageableWidth, imageableY - rowIndex * imageableHeight);
+        g2D.scale(printScale, printScale);
+        g2D.translate(-printedItemBounds.getMinX() + extraMargin,
+            -printedItemBounds.getMinY() + extraMargin);
+        g2D.translate(Math.max(0, 
+                (imageableWidth * pagesPerRow / printScale - printedItemBounds.getWidth() - 2 * extraMargin) / 2), 
+            Math.max(0, 
+                (imageableHeight * pagesPerColumn / printScale - printedItemBounds.getHeight() - 2 * extraMargin) / 2));
+        setRenderingHints(g2D);
+        try {
+          paintContent(g2D, printScale, PaintMode.PRINT);
+        } catch (InterruptedIOException ex) {
+          // Ignore exception because it may happen only in EXPORT paint mode 
         }
-        rowIndex = pageIndex / pagesPerRow;
-        columnIndex = pageIndex - rowIndex * pagesPerRow;
+        g2D.dispose();
+        return PAGE_EXISTS;
       }
-          
-      Graphics2D g2D = (Graphics2D)g.create();
-      g2D.clip(new Rectangle2D.Double(imageableX, imageableY, imageableWidth, imageableHeight));
-      // Change coordinates system to paper imageable origin
-      g2D.translate(imageableX - columnIndex * imageableWidth, imageableY - rowIndex * imageableHeight);
-      g2D.scale(printScale, printScale);
-      float extraMargin = getStrokeWidthExtraMargin(printedItems, PaintMode.PRINT);
-      g2D.translate(-printedItemBounds.getMinX() + extraMargin,
-          -printedItemBounds.getMinY() + extraMargin);
-      // Center plan in component if possible
-      g2D.translate(Math.max(0, 
-              (imageableWidth * pagesPerRow / printScale - printedItemBounds.getWidth() - 2 * extraMargin) / 2), 
-          Math.max(0, 
-              (imageableHeight * pagesPerColumn / printScale - printedItemBounds.getHeight() - 2 * extraMargin) / 2));
-      setRenderingHints(g2D);
-      try {
-        // Print component contents
-        paintContent(g2D, printScale, PaintMode.PRINT);
-      } catch (InterruptedIOException ex) {
-        // Ignore exception because it may happen only in EXPORT paint mode 
-      }   
-      g2D.dispose();
-      return PAGE_EXISTS;
-    } else {
-      return NO_SUCH_PAGE;
+    }
+    finally {
+      // Restore the originally selected level
+      this.home.setSelectedLevel(originallySelectedLevel);
     }
   }
   
